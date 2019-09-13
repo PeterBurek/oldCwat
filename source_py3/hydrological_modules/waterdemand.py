@@ -381,92 +381,166 @@ class waterdemand(object):
             #-------------------------------------
             # Activating 'usingAllocSegements'
             # Allows for water demand to be met from other cells within the same segment.
-            # edit MS 6/8/2019
+            # edit MS 12/9/2019
             # Beta version
             # -------------------------------------
 
-            # The Allocations map should assign the same coding to each cell within the same segment.
+            # The Allocations map should assign the same numerical coding to each cell within the same segment.
             # Cells not given specific codes or given a generic code (here given a value of 65535.0) are segments on their own.
 
-            # There are two methods implemented to allocate water from other cells to meet water demand:
+            # There are currently two possible options to allocate water from other cells to meet local water demand:
 
-            # 1. Share Channel Storage
-            #    This first method allows for water demand to be met by the shared channel storage of the segment
-            #    The segment-specific water demand (pot_SurfaceAbstract) and available channel storage (readAvlChannelStorage) are calculated by aggregating cell-specific values within each segment.
+            # 0. The current default makes a preference for the use of cell-specific channel
+            #   storage to first meet local cell-specific water demands.
+            #   i.e. Water demand is first requested from the cell itself.
             #
-            # 2. Do not share Channel Storage, share only Lakes and Reservoirs
-            #    The segments will only share water from included lakes and reservoirs
-            #    At 1km resolution for a highly managed aquifer, this way is probably justified.
-            #    Individual cells probably have access to channels within their own cell (but not necessarily those around it) and water delivered via canals (from lakes and reservoirs)
+            #    OPTIONS
+            # 1. Share Channel Storage
+            #    shareChannelStorage   = True
+            #    This allows for water demand to be met by the shared channel storage of the segment.
+            #    The segment-specific water demand and available channel storage are calculated by aggregating
+            #    cell-specific values within each segment.
+            #
+            # 2. Lakes and Reservoirs water storage within a segment is shared
+            #    shareReservoirStorage = True
+            #    The segments share water from included lakes and reservoirs.
+            #    The current development does not take water from small lakes.
 
-            shareChannelStorage = False #Method 2
+            # These options can eventually be put into the settings file
+            shareChannelStorage   = True
+            shareReservoirStorage = False
 
+            # Sharing Reservoir Storage and not sharing Channel Storage is the current default
+            # for the FUSE project in the Upper Bhima. The allocation areas are determined to be
+            # the reservoir-specific command areas, thus the areas sharing Reservoir water.
 
             if checkOption('usingAllocSegments'):
 
+                # First, cell-specific channel storage will be be used to fill cell-specific demand
+
+                self.var.act_SurfaceWaterAbstract = np.minimum(self.var.readAvlChannelStorageM, pot_SurfaceAbstract)
+                readAvlChannelStorageM_original = self.var.readAvlChannelStorageM # We now edit readAblChannelStorageM, so we make a copy first, to later calculate renewable water.
+                self.var.readAvlChannelStorageM -= self.var.act_SurfaceWaterAbstract
+
+
+                demand = pot_SurfaceAbstract - self.var.act_SurfaceWaterAbstract # Demand at individual cells, the cell-specific version of the later defined remain_Segment [m]
+
+                # Total each segment's remaining demand in volumes [m3]
+                demand_Segment = np.where(self.var.allocSegments != 65535.0,
+                                          npareatotal(demand * self.var.cellArea, self.var.allocSegments),
+                                          demand * self.var.cellArea)   # [m3]
+
+
                 if shareChannelStorage:
-                    # Sum up each segment's available channel storage and demand in volumes [m3]
-                    available_Segment = np.where(self.var.allocSegments != 65535.0, npareatotal(self.var.readAvlChannelStorageM * self.var.cellArea, self.var.allocSegments), self.var.readAvlChannelStorageM*self.var.cellArea)
-                    demand_Segment = np.where(self.var.allocSegments != 65535.0, npareatotal(pot_SurfaceAbstract*self.var.cellArea, self.var.allocSegments), pot_SurfaceAbstract*self.var.cellArea)
+                    # Total each segment's available channel storage in volumes [m3]
+                    available_Segment = np.where(self.var.allocSegments != 65535.0,
+                                             npareatotal(self.var.readAvlChannelStorageM * self.var.cellArea,
+                                                         self.var.allocSegments),
+                                             self.var.readAvlChannelStorageM * self.var.cellArea)
+
                     remain_Segment = np.where(demand_Segment > available_Segment, demand_Segment-available_Segment, 0.0)
 
-                    # When there is sufficient availability to fulfill demand, the water is taken away proportionally from each cell's readAvlChannelStorageM in the Segment
+                    # When there is sufficient water in the Segment to fulfill demand, the water is taken away proportionally from each cell's readAvlChannelStorageM in the Segment.
                     # For example, if total demand can be filled with 50% of total availability, then 50% of the readAvlChannelStorageM from each cell is used.
                     # Note that if a cell has too little Channel Storage, then no water will be taken from the cell as this was dealt with earlier:  readAvlChannelStorage = 0 if < (0.0005 * self.var.cellArea)
+                    # Note: Due to the shared use of abstracted channel storage, a cell may abstract more than its pot_SurfaceAbstract, as well as not necessarily satisfy its pot_SurfaceAbstract
 
-                    self.var.frac_used_Segment = globals.inZero.copy()
+                    self.var.frac_used_Segment = globals.inZero.copy() # Should move this
                     self.var.frac_used_Segment = np.where(available_Segment > 0, np.minimum(demand_Segment/available_Segment, 1.), 0.)
-                    self.var.act_SurfaceWaterAbstract =  self.var.frac_used_Segment * self.var.readAvlChannelStorageM
+                    self.var.act_SurfaceWaterAbstract +=  (self.var.frac_used_Segment * self.var.readAvlChannelStorageM)
+                    self.var.readAvlChannelStorageM -= (self.var.frac_used_Segment * self.var.readAvlChannelStorageM)
+
+                    demand *= (1 - np.minimum(available_Segment/demand_Segment, 1.))
+
+                    # This is not yet used, but may later be useful:
+                    # demand_Segment *= (1 - np.minimum(available_Segment/demand_Segment, 1.)) #Demand for allocation segment [m3]
 
                 else:
-                    self.var.act_SurfaceWaterAbstract = np.minimum(self.var.readAvlChannelStorageM, pot_SurfaceAbstract)
-                    remain_Segment = np.where(self.var.allocSegments != 65535.0, npareatotal((pot_SurfaceAbstract-self.var.act_SurfaceWaterAbstract)*self.var.cellArea, self.var.allocSegments), (pot_SurfaceAbstract-self.var.act_SurfaceWaterAbstract)*self.var.cellArea)
+                    remain_Segment = demand_Segment
+
 
                 if checkOption('includeWaterBodies'):
+                    if shareReservoirStorage:
 
-                    # Storage of wetlands, lakes, and reservoirs
-                    lakeResStorageC = np.where(self.var.waterBodyTypCTemp == 0, 0., np.where(self.var.waterBodyTypCTemp == 1, self.var.lakeStorageC,  self.var.reservoirStorageM3C))
+                        lakeResStorageC = np.where(self.var.waterBodyTypCTemp == 0, 0., np.where(self.var.waterBodyTypCTemp == 1, self.var.lakeStorageC,  self.var.reservoirStorageM3C))
 
-                    self.var.lakeResStorage = globals.inZero.copy()
-                    np.put(self.var.lakeResStorage, self.var.decompress_LR, lakeResStorageC)
+                        self.var.lakeResStorage = globals.inZero.copy()
+                        np.put(self.var.lakeResStorage, self.var.decompress_LR, lakeResStorageC) # Each Lake & Reservoir is held in a single cell in this map.
 
-                    # Sum up each segment's available lake and reservoir water, in volume [m3]
-                    lakeResStorage_alloc = np.where(self.var.allocSegments != 65535.0, npareatotal(self.var.lakeResStorage, self.var.allocSegments),self.var.lakeResStorage) # [M3]
-                    act_bigLakeResAbst_alloc = np.minimum(0.9 * lakeResStorage_alloc, remain_Segment) #take maximum 90% of reservoir volume
+                        # Sum up each segment's available lake and reservoir water, in volume [m3]
+                        lakeResStorage_alloc = np.where(self.var.allocSegments != 65535.0, npareatotal(self.var.lakeResStorage, self.var.allocSegments),self.var.lakeResStorage) # [M3]
+                        act_bigLakeResAbst_alloc = np.minimum(0.9 * lakeResStorage_alloc, remain_Segment) #take maximum 90% of reservoir volume
+                        ResAbstractFactor = divideValues(act_bigLakeResAbst_alloc, lakeResStorage_alloc)  # fraction of water abstracted versus water available for total segment reservoir volumes
+                        ResAbstractFactorC = np.compress(self.var.compress_LR, ResAbstractFactor)
 
-                    ResAbstractFactor = divideValues(act_bigLakeResAbst_alloc, lakeResStorage_alloc)  # fraction of water abstracted versus water available for total segment reservoir volumes
-                    ResAbstractFactorC = np.compress(self.var.compress_LR, ResAbstractFactor)
+                        #Take out volumes from all lakes and reservoirs
 
-                    #Take out volumes from all lakes and reservoirs
+                        self.var.lakeStorageC *= (1-ResAbstractFactorC)
+                        self.var.lakeVolumeM3C *= (1-ResAbstractFactorC) # Is this correct? Is Volume not constant?
+                        self.var.reservoirStorageM3C *= (1-ResAbstractFactorC)
+                        # and from the combined one for water balance issues
+                        self.var.lakeResStorageC *= (1-ResAbstractFactorC)
 
-                    self.var.lakeStorageC *= (1-ResAbstractFactorC)
-                    self.var.lakeVolumeM3C *= (1-ResAbstractFactorC)
-                    self.var.reservoirStorageM3C *= (1-ResAbstractFactorC)
-                    # and from the combined one for waterbalance issues
-                    self.var.lakeResStorageC *= (1-ResAbstractFactorC)
+                        #Apply this volume
+                        metRemainSegment = divideValues(act_bigLakeResAbst_alloc, remain_Segment) #by definition <= 1
+                        self.var.act_bigLakeResAbst = metRemainSegment * demand  # Demand in [m], This is not the water being abstracted necessarily from the cell
+                                                                                 # This the share of water abstracted from the communal lakes & reservoirs allocated to this cell
+                                                                                 # In attempt of satisfying the cell's water demands.
+                        demand *= (1-metRemainSegment)
 
-                    #Apply this volume
-                    metRemainSegment = divideValues(act_bigLakeResAbst_alloc, remain_Segment)
-                    self.var.act_bigLakeResAbst = metRemainSegment*(pot_SurfaceAbstract-self.var.act_SurfaceWaterAbstract)
+                    if not shareReservoirStorage:
 
-                    self.var.act_smallLakeResAbst = 0
+                        #This section was simply copied from below, as the same situation applies when shareReservoirStorage == False.
+
+                        # water that is still needed from surface water
+                        # todo: remainNeed > 0, so put max(remainNeed,0)
+                        remainNeed = demand
+
+                        # first from big Lakes and reservoirs, big lakes cover several gridcells
+                        # collect all water deamand from lake pixels of same id
+                        remainNeedBig = npareatotal(remainNeed, self.var.waterBodyID)
+                        remainNeedBigC = np.compress(self.var.compress_LR, remainNeedBig)
+
+                        # Storage of a big lake
+                        lakeResStorageC = np.where(self.var.waterBodyTypCTemp == 0, 0.,
+                                                   np.where(self.var.waterBodyTypCTemp == 1, self.var.lakeStorageC,
+                                                            self.var.reservoirStorageM3C)) / self.var.MtoM3C
+                        minlake = np.maximum(0., lakeResStorageC - 0.99 * lakeResStorageC)
+
+                        act_bigLakeAbstC = np.minimum(minlake, remainNeedBigC)
+                        # substract from both, because it is sorted by self.var.waterBodyTypCTemp
+                        self.var.lakeStorageC = self.var.lakeStorageC - act_bigLakeAbstC * self.var.MtoM3C
+                        self.var.lakeVolumeM3C = self.var.lakeVolumeM3C - act_bigLakeAbstC * self.var.MtoM3C
+                        self.var.reservoirStorageM3C = self.var.reservoirStorageM3C - act_bigLakeAbstC * self.var.MtoM3C
+                        # and from the combined one for waterbalance issues
+                        self.var.lakeResStorageC = self.var.lakeResStorageC - act_bigLakeAbstC * self.var.MtoM3C
+                        self.var.lakeResStorage = globals.inZero.copy()
+                        np.put(self.var.lakeResStorage, self.var.decompress_LR, self.var.lakeResStorageC)
+                        bigLakesFactorC = divideValues(act_bigLakeAbstC, remainNeedBigC)
+
+                        # and back to the big array
+                        bigLakesFactor = globals.inZero.copy()
+                        np.put(bigLakesFactor, self.var.decompress_LR, bigLakesFactorC)
+                        bigLakesFactorAllaroundlake = npareamaximum(bigLakesFactor, self.var.waterBodyID)
+                        # abstraction from big lakes is partioned to the users around the lake
+                        self.var.act_bigLakeResAbst = remainNeed * bigLakesFactorAllaroundlake
 
                 else:
                     self.var.act_bigLakeResAbst = 0
-                    self.var.act_smallLakeResAbst = 0
+                self.var.act_smallLakeResAbst = 0 # In the current development, small lakes are not directly used to meet water demands.
 
                 # available surface water is from river network + large/small lake & reservoirs
-                self.var.act_SurfaceWaterAbstract += self.var.act_bigLakeResAbst + self.var.act_smallLakeResAbst
+                self.var.act_SurfaceWaterAbstract += (self.var.act_bigLakeResAbst + self.var.act_smallLakeResAbst)
 
                 # remaining is taken from groundwater if possible
-                self.var.pot_GroundwaterAbstract = np.maximum(totalDemand  - self.var.act_SurfaceWaterAbstract, 0)
+                self.var.pot_GroundwaterAbstract = np.maximum((totalDemand -(pot_SurfaceAbstract-demand)), 0)
 
                 # real surface water abstraction can be lower, because not all demand can be done from surface water
                 #act_swAbstractionFraction = divideValues(self.var.act_SurfaceWaterAbstract, totalDemand)
                 act_swAbstractionFraction = divideValues(totalDemand-self.var.pot_GroundwaterAbstract, totalDemand)
 
                 # calculate renewableAvlWater (non-fossil groundwater and channel) - environmental flow
-                self.var.renewableAvlWater = self.var.readAvlStorGroundwater + self.var.readAvlChannelStorageM
+                self.var.renewableAvlWater = self.var.readAvlStorGroundwater + readAvlChannelStorageM_original
 
 
             # -------------------------------------
