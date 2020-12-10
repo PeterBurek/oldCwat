@@ -1,3 +1,8 @@
+# we move the repository to https://github.com/iiasa/CWatM
+
+So this one will not be used anymore
+
+
 # Community Water Model (CWatM)
 
 IIASA
